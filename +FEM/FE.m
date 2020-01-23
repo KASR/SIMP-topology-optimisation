@@ -27,6 +27,10 @@ classdef FE
             element.dims = dims;
             element.material = material;
             switch type
+                % Membrane
+                case 'Plane'
+                    element.nodes = 4;
+                    element.ndof = 2; 
                 % Kirchhoff
                 case 'ACM'
                     element.nodes = 4;
@@ -38,6 +42,10 @@ classdef FE
                 case 'MB4'      % Mindlin bilinear 4 nodes
                     element.nodes = 4;
                     element.ndof = 3;
+                % Shell : membrane + Mindlin
+                case 'Shell'      % Shell bilinear 4 nodes
+                    element.nodes = 4;
+                    element.ndof = 5; 
             end
             element.N = element.buildSF();
             element.K = element.buildK();
@@ -55,6 +63,17 @@ classdef FE
                       dims.width/2  dims.height/2
                      -dims.width/2  dims.height/2]; % nodes coordinates
             switch element.type
+            % Membrane
+                case 'Plane'
+                    P = [1 x y x*y];
+                    A = zeros(n); % Aa=w
+                    for i = 1:n
+                        A(i,:) = subs(P, {x,y}, {coord(i,1), coord(i,2)})';
+                    end
+                    psi = (P*A^-1); % Nw=P'(A^-1)w
+                    for i = 1:n
+                        N(:, 2*(i-1)+1:2*i) = eye(2)*psi(i);
+                    end
                 % Kirchhoff
                 case 'ACM'
                     P = [1 x y x^2 x*y y^2 x^3 x^2*y x*y^2 y^3 x^3*y x*y^3]'; % w=P'a
@@ -83,6 +102,17 @@ classdef FE
                     for i = 1:n
                         N(:, ndof*(i-1)+1:ndof*i) = eye(ndof)*psi(i);
                     end
+                % Shell : membrane + Mindlin (n=4, ndof=6)
+                case 'Shell'          % Shell bilinear 4 nodes
+                    P = [1 x y x*y]';
+                    A = zeros(n); % Aa=w
+                    for i = 1:n
+                        A(i,:) = subs(P, {x,y}, {coord(i,1), coord(i,2)})';
+                    end
+                    psi = (P'*A^-1); % Nw=P'(A^-1)w
+                    for i = 1:n
+                        N(:, 3*(i-1)+1:3*i) = eye(3)*psi(i);
+                    end
             end
         end
         
@@ -94,12 +124,21 @@ classdef FE
             dy = element.dims.height;
             dz = element.dims.thickness;
             N = element.N;
+            Cm = E/(1-v^2)*[1 v 0
+                            v 1 0
+                            0 0 (1-v)/2]*dz; % membrane constitutive matrix
             Cf = E/(1-v^2)*[1 v 0
                             v 1 0
                             0 0 (1-v)/2]*dz^3/12; % flexural constitutive matrix
             Cs = 5/6*E/(2*(1+v))*[1 0
                                   0 1]*dz; % shear constitutive matrix
             switch element.type
+                % Membrane
+                case 'Plane'
+                    Bm = [-diff(N(1,:), x)
+                          diff(N(2,:), y)
+                          -diff(N(1,:), y) + diff(N(2,:), x)]; % membrane strain-displacement matrix
+                    K = double(int(int(Bm'*Cm*Bm, y, -dy/2, dy/2), x, -dx/2, dx/2));
                 % Kirchhoff
                 case {'ACM', 'BMF'}
                     Bf = [-diff(diff(N, x), x)
@@ -114,6 +153,24 @@ classdef FE
                     Bs = [diff(N(1,:), x)
                           diff(N(1,:), y)] + N(2:3,:); % shear strain-displacement matrix
                     K = double(int(int(Bf'*Cf*Bf + Bs'*Cs*Bs, y, -dy/2, dy/2), x, -dx/2, dx/2));
+                                    % Shell
+                case 'Shell'
+                    n = element.nodes;
+                    ndof = element.ndof;
+                    Nm = N(1:2,[1,2,4,5,7,8,10,11]);
+                    Bm = [diff(Nm(1,:), x)
+                          diff(Nm(2,:), y)
+                          diff(Nm(1,:), y) + diff(Nm(2,:), x)]; % membrane strain-displacement matrix
+                    Bf = [diff(N(2,:), x)
+                          diff(N(3,:), y)
+                          diff(N(2,:), y) + diff(N(3,:), x)]; % flexural strain-displacement matrix
+                    Bs = [diff(N(1,:), x)
+                          diff(N(1,:), y)] + N(2:3,:); % shear strain-displacement matrix
+                    K = zeros(n*ndof);
+                    ii = [1 2 6 7 11 12 16 17];
+                    jj = [3 4 5 8 9 10 13 14 15 18 19 20];
+                    K(ii,ii) = double(int(int(Bm'*Cm*Bm, y, -dy/2, dy/2), x, -dx/2, dx/2));
+                    K(jj,jj) = double(int(int(Bf'*Cf*Bf + Bs'*Cs*Bs, y, -dy/2, dy/2), x, -dx/2, dx/2));
             end
         end
         
@@ -129,6 +186,11 @@ classdef FE
                 0 dz^3/12 0
                 0 0 dz^3/12]*rho;
             switch element.type
+                % Membrane
+                case 'Plane'
+                    C = [dz 0
+                         0  dz]*rho;
+                    M = double(int(int(N'*C*N, y, -dy/2, dy/2), x, -dx/2, dx/2));
                 % Kirchhoff
                 case {'ACM', 'BMF'}
                     B = [N; -diff(N, x); -diff(N, y)]; %#ok<*PROP>
@@ -136,6 +198,15 @@ classdef FE
                 % Mindlin
                 case 'MB4'
                     M = double(int(int(N'*C*N, y, -dy/2, dy/2), x, -dx/2, dx/2));
+                % Shell
+                case 'Shell'                
+                    I = [dz dz dz dz^3/12 dz^3/12];
+                    C0 = rho*diag(I);
+                    ii = [1 2 6 7 11 12 16 17];
+                    jj = [3 4 5 8 9 10 13 14 15 18 19 20];
+                    N1(1:2,ii) = N(1:2,[1,2,4,5,7,8,10,11]);
+                    N1(3:5,jj) = N;
+                    M = double(int(int(N1'*C0*N1, y, -dy/2, dy/2), x, -dx/2, dx/2));
             end
         end
     end
